@@ -258,18 +258,25 @@ const App = ({ config, settings, startupWarnings = [] }: AppProps) => {
       addItem(
         {
           type: MessageType.INFO,
-          text: `⚡ Slow response times detected. Automatically switching from ${currentModel} to ${fallbackModel} for faster responses for the remainder of this session.
-⚡ To avoid this you can either upgrade to Standard tier. See: https://goo.gle/set-up-gemini-code-assist
-⚡ Or you can utilize a Gemini API Key. See: https://goo.gle/gemini-cli-docs-auth#gemini-api-key
-⚡ You can switch authentication methods by typing /auth`,
+          text: `⚡ Slow response times detected with the current model (${currentModel}).
+⚡ Switching to a model like ${fallbackModel} might provide faster responses.
+⚡ You can also upgrade to Standard tier (See: https://goo.gle/set-up-gemini-code-assist) or use a Gemini API Key (See: https://goo.gle/gemini-cli-docs-auth#gemini-api-key).
+⚡ Type /auth to explore authentication methods.`,
         },
         Date.now(),
       );
-      return true; // Always accept the fallback
+      // Don't automatically switch. Instead, show the suggestion UI.
+      setShowModelSwitchSuggestion(true);
+      // Store the suggested fallback model so the UI can specifically mention it if needed,
+      // or the model selection component can highlight it.
+      // For now, lastFailedQuery can hold the context if we want to retry with a new model.
+      // Or, we could add another state for `suggestedModelForSwitch`.
+      // For this change, just showing the generic model switch suggestion is sufficient.
+      return false; // Prevent automatic fallback
     };
 
     config.setFlashFallbackHandler(flashFallbackHandler);
-  }, [config, addItem]);
+  }, [config, addItem, setShowModelSwitchSuggestion]); // Added setShowModelSwitchSuggestion to dependencies
 
   const {
     handleSlashCommand,

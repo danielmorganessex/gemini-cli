@@ -652,5 +652,40 @@ describe('App UI', () => {
       // And because both failed, the suggestion UI should appear
       expect(lastFrame()).toContain('Having trouble connecting or getting responses?');
     });
+
+    it('should show model switch suggestion when flashFallbackHandler is invoked', async () => {
+      let capturedFlashFallbackHandler: ((currentModel: string, fallbackModel: string) => Promise<boolean>) | null = null;
+
+      mockConfig.setFlashFallbackHandler = vi.fn((handler) => {
+        capturedFlashFallbackHandler = handler;
+      });
+
+      const { lastFrame, unmount } = render(
+        <App
+          config={mockConfig as unknown as ServerConfig}
+          settings={mockSettings}
+        />,
+      );
+      currentUnmount = unmount;
+      await Promise.resolve(); // Initial render to ensure useEffects run
+
+      expect(mockConfig.setFlashFallbackHandler).toHaveBeenCalled();
+      expect(capturedFlashFallbackHandler).not.toBeNull();
+
+      // Simulate the core library invoking the fallback handler
+      if (capturedFlashFallbackHandler) {
+        const preventSwitch = await capturedFlashFallbackHandler("gemini-pro", "gemini-flash");
+        expect(preventSwitch).toBe(false); // Handler should prevent automatic switch
+      }
+
+      await Promise.resolve(); // Allow state updates to render
+
+      // Check if the message about slow responses was added (indirectly checking addItem)
+      // This requires access to the history or mocking `addItem` passed to `useGeminiStream` and then to `App`
+      // For simplicity here, we'll focus on the suggestion UI appearing.
+      expect(lastFrame()).toContain('Having trouble connecting or getting responses?');
+      // We can also check if addItem was called if we properly mock the history/addItem chain.
+      // The current `useHistory` mock might not be suitable for that.
+    });
   });
 });
