@@ -270,4 +270,138 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTelemetryOtlpEndpoint()).toBe(DEFAULT_OTLP_ENDPOINT);
     });
   });
+
+  describe('API Key Management', () => {
+    const baseParamsWithoutApiKeys: ConfigParameters = { ...baseParams };
+    delete baseParamsWithoutApiKeys.geminiApiKeys;
+
+    beforeEach(() => {
+      // Clear any environment variables set by previous tests
+      delete process.env.GEMINI_API_KEY;
+      for (let i = 0; i < 100; i++) {
+        delete process.env[`GEMINI_API_KEY_${i}`];
+      }
+    });
+
+    it('should initialize with no API keys if none are provided', () => {
+      const config = new Config(baseParamsWithoutApiKeys);
+      expect(config.getCurrentGeminiApiKey()).toBeUndefined();
+      expect(config.hasMultipleApiKeys()).toBe(false);
+    });
+
+    it('should load a single API key from GEMINI_API_KEY environment variable', () => {
+      process.env.GEMINI_API_KEY = 'env_single_key';
+      const config = new Config(baseParamsWithoutApiKeys);
+      expect(config.getCurrentGeminiApiKey()).toBe('env_single_key');
+      expect(config.hasMultipleApiKeys()).toBe(false);
+    });
+
+    it('should load API keys from GEMINI_API_KEY_N environment variables', () => {
+      process.env.GEMINI_API_KEY_1 = 'env_key_1';
+      process.env.GEMINI_API_KEY_2 = 'env_key_2';
+      const config = new Config(baseParamsWithoutApiKeys);
+      expect(config.getCurrentGeminiApiKey()).toBe('env_key_1');
+      expect(config.hasMultipleApiKeys()).toBe(true);
+      config.switchToNextGeminiApiKey();
+      expect(config.getCurrentGeminiApiKey()).toBe('env_key_2');
+    });
+
+    it('should load API keys from params.geminiApiKeys array', () => {
+      const paramsWithKeys: ConfigParameters = {
+        ...baseParamsWithoutApiKeys,
+        geminiApiKeys: ['param_key_1', 'param_key_2'],
+      };
+      const config = new Config(paramsWithKeys);
+      expect(config.getCurrentGeminiApiKey()).toBe('param_key_1');
+      expect(config.hasMultipleApiKeys()).toBe(true);
+      config.switchToNextGeminiApiKey();
+      expect(config.getCurrentGeminiApiKey()).toBe('param_key_2');
+    });
+
+    it('should prioritize params.geminiApiKeys over GEMINI_API_KEY env var if both provided', () => {
+      process.env.GEMINI_API_KEY = 'env_single_key';
+      const paramsWithKeys: ConfigParameters = {
+        ...baseParamsWithoutApiKeys,
+        geminiApiKeys: ['param_key_1'],
+      };
+      const config = new Config(paramsWithKeys);
+      expect(config.getCurrentGeminiApiKey()).toBe('param_key_1');
+    });
+
+    it('should combine params.geminiApiKeys and GEMINI_API_KEY_N env vars, prioritizing params and avoiding duplicates', () => {
+      process.env.GEMINI_API_KEY_1 = 'env_key_1'; // Will be loaded
+      process.env.GEMINI_API_KEY_2 = 'param_key_1'; // Duplicate of a param key, should be ignored from env
+      process.env.GEMINI_API_KEY_3 = 'env_key_3'; // Will be loaded
+      const paramsWithKeys: ConfigParameters = {
+        ...baseParamsWithoutApiKeys,
+        geminiApiKeys: ['param_key_1', 'param_key_2'],
+      };
+      const config = new Config(paramsWithKeys);
+      // Expected order: param_key_1, param_key_2, env_key_1, env_key_3
+      expect(config.getCurrentGeminiApiKey()).toBe('param_key_1');
+      config.switchToNextGeminiApiKey();
+      expect(config.getCurrentGeminiApiKey()).toBe('param_key_2');
+      config.switchToNextGeminiApiKey();
+      expect(config.getCurrentGeminiApiKey()).toBe('env_key_1');
+      config.switchToNextGeminiApiKey();
+      expect(config.getCurrentGeminiApiKey()).toBe('env_key_3');
+      expect(config.hasMultipleApiKeys()).toBe(true);
+    });
+
+
+    it('should correctly cycle through multiple API keys using switchToNextGeminiApiKey', () => {
+      const paramsWithKeys: ConfigParameters = {
+        ...baseParamsWithoutApiKeys,
+        geminiApiKeys: ['key1', 'key2', 'key3'],
+      };
+      const config = new Config(paramsWithKeys);
+      expect(config.getCurrentGeminiApiKey()).toBe('key1');
+      expect(config.switchToNextGeminiApiKey()).toBe('key2');
+      expect(config.getCurrentGeminiApiKey()).toBe('key2');
+      expect(config.switchToNextGeminiApiKey()).toBe('key3');
+      expect(config.getCurrentGeminiApiKey()).toBe('key3');
+      expect(config.switchToNextGeminiApiKey()).toBe('key1'); // Cycle back
+      expect(config.getCurrentGeminiApiKey()).toBe('key1');
+    });
+
+    it('switchToNextGeminiApiKey should return undefined if no keys are configured', () => {
+      const config = new Config(baseParamsWithoutApiKeys);
+      expect(config.switchToNextGeminiApiKey()).toBeUndefined();
+    });
+
+    it('hasMultipleApiKeys should return true if more than one key is present', () => {
+      const paramsWithKeys: ConfigParameters = {
+        ...baseParamsWithoutApiKeys,
+        geminiApiKeys: ['key1', 'key2'],
+      };
+      const config = new Config(paramsWithKeys);
+      expect(config.hasMultipleApiKeys()).toBe(true);
+    });
+
+    it('hasMultipleApiKeys should return false if only one key is present', () => {
+      process.env.GEMINI_API_KEY = 'single_key';
+      const config = new Config(baseParamsWithoutApiKeys);
+      expect(config.hasMultipleApiKeys()).toBe(false);
+    });
+
+     it('hasMultipleApiKeys should return false if no keys are present', () => {
+      const config = new Config(baseParamsWithoutApiKeys);
+      expect(config.hasMultipleApiKeys()).toBe(false);
+    });
+
+    it('should handle GEMINI_API_KEY and GEMINI_API_KEY_N together correctly, avoiding duplicates from GEMINI_API_KEY', () => {
+      process.env.GEMINI_API_KEY = 'env_single_key';
+      process.env.GEMINI_API_KEY_1 = 'env_key_1';
+      process.env.GEMINI_API_KEY_2 = 'env_single_key'; // This is a duplicate of GEMINI_API_KEY
+
+      const config = new Config(baseParamsWithoutApiKeys);
+      // Expected: env_single_key, env_key_1
+      expect(config.getCurrentGeminiApiKey()).toBe('env_single_key');
+      config.switchToNextGeminiApiKey();
+      expect(config.getCurrentGeminiApiKey()).toBe('env_key_1');
+      config.switchToNextGeminiApiKey();
+      expect(config.getCurrentGeminiApiKey()).toBe('env_single_key'); // Cycle back
+      expect(config.hasMultipleApiKeys()).toBe(true); // Two unique keys
+    });
+  });
 });

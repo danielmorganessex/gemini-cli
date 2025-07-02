@@ -89,11 +89,13 @@ export const useGeminiStream = (
   >,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
-  onAuthError: () => void,
+  onAuthError: (originalQuery: PartListUnion | null) => void, // Modified to accept originalQuery
   performMemoryRefresh: () => Promise<void>,
+  handleRetryWithNewCredential: (originalQuery: PartListUnion) => Promise<boolean>, // New callback
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const lastQueryRef = useRef<PartListUnion | null>(null); // To store the last query for retry
   const turnCancelledRef = useRef(false);
   const [isResponding, setIsResponding] = useState<boolean>(false);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
@@ -516,6 +518,9 @@ export const useGeminiStream = (
         return;
       }
 
+      // Store the query that's about to be sent for potential retry
+      lastQueryRef.current = queryToSend;
+
       if (!options?.isContinuation) {
         startNewTurn();
       }
@@ -540,14 +545,38 @@ export const useGeminiStream = (
           setPendingHistoryItem(null);
         }
       } catch (error: unknown) {
+        const errorMessage = getErrorMessage(error) || 'Unknown error';
         if (error instanceof UnauthorizedError) {
-          onAuthError();
+          onAuthError(lastQueryRef.current);
+        } else if (
+          // TODO: Refine these conditions based on actual API error responses for rate limiting
+          errorMessage.includes('429') || // Typically HTTP 429 Too Many Requests
+          errorMessage.toLowerCase().includes('rate limit') ||
+          errorMessage.toLowerCase().includes('slow response') ||
+          errorMessage.toLowerCase().includes('quota exceeded')
+        ) {
+          const
+            retried = await handleRetryWithNewCredential(lastQueryRef.current!);
+          if (!retried) {
+            // If retry wasn't successful or not attempted, show original error
+            addItem(
+              {
+                type: MessageType.ERROR,
+                text: parseAndFormatApiError(
+                  errorMessage,
+                  config.getContentGeneratorConfig().authType,
+                ),
+              },
+              userMessageTimestamp,
+            );
+          }
+          // If retried is true, the retry attempt will handle further UI updates or errors.
         } else if (!isNodeError(error) || error.name !== 'AbortError') {
           addItem(
             {
               type: MessageType.ERROR,
               text: parseAndFormatApiError(
-                getErrorMessage(error) || 'Unknown error',
+                errorMessage,
                 config.getContentGeneratorConfig().authType,
               ),
             },
@@ -571,6 +600,7 @@ export const useGeminiStream = (
       startNewTurn,
       onAuthError,
       config,
+      handleRetryWithNewCredential, // Added new callback
     ],
   );
 

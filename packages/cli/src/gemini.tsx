@@ -5,8 +5,8 @@
  */
 
 import React from 'react';
-import { render } from 'ink';
-import { AppWrapper } from './ui/App.js';
+import { render, useInput } from 'ink';
+import { AppWrapper, useAppContext } from './ui/App.js';
 import { loadCliConfig } from './config/config.js';
 import { readStdin } from './utils/readStdin.js';
 import { basename } from 'node:path';

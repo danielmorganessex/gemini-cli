@@ -47,12 +47,14 @@ export type ContentGeneratorConfig = {
   authType?: AuthType | undefined;
 };
 
+import { Config } from '../config/config.js'; // Import Config
+
 export async function createContentGeneratorConfig(
   model: string | undefined,
   authType: AuthType | undefined,
-  config?: { getModel?: () => string },
+  config?: Config, // Changed to accept full Config object
 ): Promise<ContentGeneratorConfig> {
-  const geminiApiKey = process.env.GEMINI_API_KEY;
+  // const geminiApiKey = process.env.GEMINI_API_KEY; // No longer needed here
   const googleApiKey = process.env.GOOGLE_API_KEY;
   const googleCloudProject = process.env.GOOGLE_CLOUD_PROJECT;
   const googleCloudLocation = process.env.GOOGLE_CLOUD_LOCATION;
@@ -70,13 +72,16 @@ export async function createContentGeneratorConfig(
     return contentGeneratorConfig;
   }
 
-  if (authType === AuthType.USE_GEMINI && geminiApiKey) {
-    contentGeneratorConfig.apiKey = geminiApiKey;
-    contentGeneratorConfig.model = await getEffectiveModel(
-      contentGeneratorConfig.apiKey,
-      contentGeneratorConfig.model,
-    );
-
+  if (authType === AuthType.USE_GEMINI && config) {
+    contentGeneratorConfig.apiKey = config.getCurrentGeminiApiKey(); // Use new method
+    if (contentGeneratorConfig.apiKey) {
+      contentGeneratorConfig.model = await getEffectiveModel(
+        contentGeneratorConfig.apiKey,
+        contentGeneratorConfig.model,
+      );
+    }
+    // If no API key is found (e.g., not configured), it will remain undefined
+    // and likely fail later, which is the expected behavior.
     return contentGeneratorConfig;
   }
 

@@ -40,7 +40,10 @@ const SIGN_IN_FAILURE_URL =
   'https://developers.google.com/gemini-code-assist/auth_failure_gemini';
 
 const GEMINI_DIR = '.gemini';
-const CREDENTIAL_FILENAME = 'oauth_creds.json';
+const CREDENTIAL_FILENAME_PREFIX = 'oauth_creds_';
+const MAX_ACCOUNTS = 5; // Maximum number of accounts to support
+
+let currentAccountIndex = 0;
 
 /**
  * An Authentication URL for updating the credentials of a Oauth2Client
@@ -53,32 +56,63 @@ export interface OauthWebLogin {
 }
 
 export async function getOauthClient(): Promise<OAuth2Client> {
-  const client = new OAuth2Client({
+  for (let i = 0; i < MAX_ACCOUNTS; i++) {
+    const client = new OAuth2Client({
+      clientId: OAUTH_CLIENT_ID,
+      clientSecret: OAUTH_CLIENT_SECRET,
+    });
+    try {
+      if (await loadCachedCredentials(client, currentAccountIndex)) {
+        // Found valid cached credentials.
+        return client;
+      }
+    } catch (error) {
+      // Ignore error and try next account
+    }
+    currentAccountIndex = (currentAccountIndex + 1) % MAX_ACCOUNTS;
+  }
+
+  // If no cached credentials found for any account, try to authenticate a new one
+  currentAccountIndex = 0; // Reset to the first account for new login
+  let client = new OAuth2Client({
     clientId: OAUTH_CLIENT_ID,
     clientSecret: OAUTH_CLIENT_SECRET,
   });
 
-  if (await loadCachedCredentials(client)) {
-    // Found valid cached credentials.
+  // Attempt to load credentials for the currentAccountIndex one last time
+  // in case a new account was added manually or by another process.
+  if (await loadCachedCredentials(client, currentAccountIndex)) {
     return client;
   }
 
-  const webLogin = await authWithWeb(client);
+
+  // If still no valid credentials, initiate web login for the current account index
+  const webLogin = await authWithWeb(client, currentAccountIndex);
 
   console.log(
-    `\n\nCode Assist login required.\n` +
+    `\n\nCode Assist login required for account ${currentAccountIndex + 1}.\n` +
       `Attempting to open authentication page in your browser.\n` +
       `Otherwise navigate to:\n\n${webLogin.authUrl}\n\n`,
   );
   await open(webLogin.authUrl);
   console.log('Waiting for authentication...');
 
-  await webLogin.loginCompletePromise;
+  try {
+    await webLogin.loginCompletePromise;
+  } catch (error) {
+    console.error(`Authentication failed for account ${currentAccountIndex + 1}:`, error);
+    // Attempt to cycle to the next account if authentication fails
+    currentAccountIndex = (currentAccountIndex + 1) % MAX_ACCOUNTS;
+    // We need to re-throw or handle this more gracefully, possibly by prompting the user
+    // or trying the next available slot if the current one fails authentication.
+    // For now, re-throwing to indicate failure.
+    throw error;
+  }
 
   return client;
 }
 
-async function authWithWeb(client: OAuth2Client): Promise<OauthWebLogin> {
+async function authWithWeb(client: OAuth2Client, accountIndex: number): Promise<OauthWebLogin> {
   const port = await getAvailablePort();
   const redirectUri = `http://localhost:${port}/oauth2callback`;
   const state = crypto.randomBytes(32).toString('hex');
@@ -96,25 +130,26 @@ async function authWithWeb(client: OAuth2Client): Promise<OauthWebLogin> {
           res.writeHead(HTTP_REDIRECT, { Location: SIGN_IN_FAILURE_URL });
           res.end();
           reject(new Error('Unexpected request: ' + req.url));
+          return;
         }
         // acquire the code from the querystring, and close the web server.
         const qs = new url.URL(req.url!, 'http://localhost:3000').searchParams;
         if (qs.get('error')) {
           res.writeHead(HTTP_REDIRECT, { Location: SIGN_IN_FAILURE_URL });
           res.end();
-
           reject(new Error(`Error during authentication: ${qs.get('error')}`));
+          return;
         } else if (qs.get('state') !== state) {
           res.end('State mismatch. Possible CSRF attack');
-
           reject(new Error('State mismatch. Possible CSRF attack'));
+          return;
         } else if (qs.get('code')) {
           const { tokens } = await client.getToken({
             code: qs.get('code')!,
             redirect_uri: redirectUri,
           });
           client.setCredentials(tokens);
-          await cacheCredentials(client.credentials);
+          await cacheCredentials(client.credentials, accountIndex);
 
           res.writeHead(HTTP_REDIRECT, { Location: SIGN_IN_SUCCESS_URL });
           res.end();
@@ -158,10 +193,10 @@ export function getAvailablePort(): Promise<number> {
   });
 }
 
-async function loadCachedCredentials(client: OAuth2Client): Promise<boolean> {
+async function loadCachedCredentials(client: OAuth2Client, accountIndex: number): Promise<boolean> {
   try {
     const keyFile =
-      process.env.GOOGLE_APPLICATION_CREDENTIALS || getCachedCredentialPath();
+      process.env.GOOGLE_APPLICATION_CREDENTIALS || getCachedCredentialPath(accountIndex);
 
     const creds = await fs.readFile(keyFile, 'utf-8');
     client.setCredentials(JSON.parse(creds));
@@ -176,27 +211,56 @@ async function loadCachedCredentials(client: OAuth2Client): Promise<boolean> {
     await client.getTokenInfo(token);
 
     return true;
-  } catch (_) {
+  } catch (error) {
+    // If specific errors indicate rate limiting or other recoverable issues,
+    // we could return a specific value or throw a custom error to trigger cycling.
+    // For now, any error during load/validation means we treat credentials as invalid.
+    if (error.message.includes('invalid_grant') || error.message.includes('revoked')) {
+        // Credentials might be stale or revoked, try to remove them
+        await clearCachedCredentialFile(accountIndex);
+    }
+    // console.debug(`Failed to load cached credentials for account ${accountIndex}:`, error.message);
     return false;
   }
 }
 
-async function cacheCredentials(credentials: Credentials) {
-  const filePath = getCachedCredentialPath();
+async function cacheCredentials(credentials: Credentials, accountIndex: number) {
+  const filePath = getCachedCredentialPath(accountIndex);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 
   const credString = JSON.stringify(credentials, null, 2);
   await fs.writeFile(filePath, credString);
 }
 
-function getCachedCredentialPath(): string {
-  return path.join(os.homedir(), GEMINI_DIR, CREDENTIAL_FILENAME);
+function getCachedCredentialPath(accountIndex: number): string {
+  return path.join(os.homedir(), GEMINI_DIR, `${CREDENTIAL_FILENAME_PREFIX}${accountIndex}.json`);
 }
 
-export async function clearCachedCredentialFile() {
+export async function clearCachedCredentialFile(accountIndex?: number) {
   try {
-    await fs.rm(getCachedCredentialPath());
+    if (accountIndex === undefined) {
+        // Clear all account credentials if no index is specified
+        for (let i = 0; i < MAX_ACCOUNTS; i++) {
+            try {
+                await fs.rm(getCachedCredentialPath(i));
+            } catch (e) {
+                // Ignore if a specific file doesn't exist
+            }
+        }
+    } else {
+        await fs.rm(getCachedCredentialPath(accountIndex));
+    }
   } catch (_) {
     /* empty */
   }
+}
+
+export function getCurrentAccountIndex(): number {
+    return currentAccountIndex;
+}
+
+export function switchToNextAccount(): void {
+    currentAccountIndex = (currentAccountIndex + 1) % MAX_ACCOUNTS;
+    // Potentially, we might want to trigger a re-authentication or client refresh here
+    // For now, just updating the index. The next call to getOauthClient will use it.
 }

@@ -54,9 +54,12 @@ import {
   ApprovalMode,
   isEditorAvailable,
   EditorType,
+  AuthType, // Added AuthType
+  PartListUnion, // Added PartListUnion
 } from '@google/gemini-cli-core';
 import { validateAuthMethod } from '../config/auth.js';
 import { useLogger } from './hooks/useLogger.js';
+import { switchToNextAccount, getCurrentAccountIndex } from '@google/gemini-cli-core'; // Added imports for account switching
 import { StreamingContext } from './contexts/StreamingContext.js';
 import {
   SessionStatsProvider,
@@ -132,6 +135,12 @@ const App = ({ config, settings, startupWarnings = [] }: AppProps) => {
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [constrainHeight, setConstrainHeight] = useState<boolean>(true);
   const [showPrivacyNotice, setShowPrivacyNotice] = useState<boolean>(false);
+  const [isModelSelectionOpen, setIsModelSelectionOpen] = useState<boolean>(false);
+  const [showModelSwitchSuggestion, setShowModelSwitchSuggestion] = useState<boolean>(false);
+  const triedAccountsInCurrentSequence = useRef(new Set<number>());
+  const triedApiKeysInCurrentSequence = useRef(new Set<string>());
+  const lastFailedQuery = useRef<PartListUnion | null>(null);
+
 
   const openPrivacyNotice = useCallback(() => {
     setShowPrivacyNotice(true);
@@ -373,6 +382,15 @@ const App = ({ config, settings, startupWarnings = [] }: AppProps) => {
       handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
     } else if (key.ctrl && input === 's' && !enteringConstrainHeightMode) {
       setConstrainHeight(false);
+    } else if (key.ctrl && (input === 'm' || input === 'M')) {
+      if (!isModelSelectionOpen) {
+        setIsModelSelectionOpen(true);
+      }
+    } else if (key.escape) {
+      if (isModelSelectionOpen) {
+        setIsModelSelectionOpen(false);
+      }
+      // Potentially other actions for escape key if needed in the future
     }
   });
 
@@ -397,10 +415,76 @@ const App = ({ config, settings, startupWarnings = [] }: AppProps) => {
     return editorType as EditorType;
   }, [settings, openEditorDialog]);
 
-  const onAuthError = useCallback(() => {
-    setAuthError('reauth required');
-    openAuthDialog();
-  }, [openAuthDialog, setAuthError]);
+  // Forward declaration for submitQuery to be used in callbacks
+  let doSubmitQuery: (query: PartListUnion, options?: { isContinuation: boolean }) => Promise<void> = async () => {};
+
+  const handleRetryWithNewCredential = useCallback(async (originalQuery: PartListUnion | null): Promise<boolean> => {
+    if (!originalQuery) return false;
+
+    const authType = config.getContentGeneratorConfig()?.authType;
+    lastFailedQuery.current = originalQuery; // Store for potential manual retry by user
+
+    if (authType === AuthType.LOGIN_WITH_GOOGLE_PERSONAL) {
+      const initialAccountIndex = getCurrentAccountIndex();
+      if (triedAccountsInCurrentSequence.current.has(initialAccountIndex)) {
+        // Already tried this account in the current failure sequence
+        setShowModelSwitchSuggestion(true);
+        return false;
+      }
+      triedAccountsInCurrentSequence.current.add(initialAccountIndex);
+      switchToNextAccount();
+      const nextAccountIndex = getCurrentAccountIndex();
+
+      if (nextAccountIndex === initialAccountIndex && triedAccountsInCurrentSequence.current.size > 1) {
+        // Cycled through all accounts
+        setShowModelSwitchSuggestion(true);
+        return false;
+      }
+      addItem({ type: MessageType.INFO, text: `Attempting to switch to Google account ${nextAccountIndex + 1}...` }, Date.now());
+      await config.refreshAuth(AuthType.LOGIN_WITH_GOOGLE_PERSONAL);
+      await doSubmitQuery(originalQuery, { isContinuation: true });
+      triedAccountsInCurrentSequence.current.clear(); // Clear after successful retry or next attempt
+      return true;
+
+    } else if (authType === AuthType.USE_GEMINI) {
+      const currentApiKey = config.getCurrentGeminiApiKey();
+      if (currentApiKey && triedApiKeysInCurrentSequence.current.has(currentApiKey)) {
+        setShowModelSwitchSuggestion(true);
+        return false;
+      }
+      if (currentApiKey) {
+        triedApiKeysInCurrentSequence.current.add(currentApiKey);
+      }
+
+      if (!config.hasMultipleApiKeys()) {
+        setShowModelSwitchSuggestion(true);
+        return false;
+      }
+      const nextApiKey = config.switchToNextGeminiApiKey();
+      if (!nextApiKey || (currentApiKey === nextApiKey && triedApiKeysInCurrentSequence.current.size > 1)) {
+         // Cycled through all keys or no more keys
+        setShowModelSwitchSuggestion(true);
+        return false;
+      }
+      addItem({ type: MessageType.INFO, text: "Attempting to switch to next Gemini API key..." }, Date.now());
+      await config.refreshAuth(AuthType.USE_GEMINI);
+      await doSubmitQuery(originalQuery, { isContinuation: true });
+      triedApiKeysInCurrentSequence.current.clear(); // Clear after successful retry or next attempt
+      return true;
+    }
+    setShowModelSwitchSuggestion(true);
+    return false;
+  }, [config, addItem]);
+
+  const onAuthError = useCallback(async (originalQuery: PartListUnion | null) => {
+    // Try to cycle credentials first
+    const retried = await handleRetryWithNewCredential(originalQuery);
+    if (!retried) {
+      // If cycling didn't work or wasn't applicable, then show auth dialog
+      setAuthError('Authentication failed. Please re-authenticate or check your credentials.');
+      openAuthDialog();
+    }
+  }, [handleRetryWithNewCredential, openAuthDialog, setAuthError]);
 
   const {
     streamingState,
@@ -418,9 +502,15 @@ const App = ({ config, settings, startupWarnings = [] }: AppProps) => {
     handleSlashCommand,
     shellModeActive,
     getPreferredEditor,
-    onAuthError,
+    onAuthError, // Pass the modified onAuthError
     performMemoryRefresh,
+    handleRetryWithNewCredential, // Pass the new callback
   );
+  // Assign the actual submitQuery to the forward-declared one
+  useEffect(() => {
+    doSubmitQuery = submitQuery;
+  }, [submitQuery]);
+
   pendingHistoryItems.push(...pendingGeminiHistoryItems);
   const { elapsedTime, currentLoadingPhrase } =
     useLoadingIndicator(streamingState);
@@ -689,6 +779,45 @@ const App = ({ config, settings, startupWarnings = [] }: AppProps) => {
                 settings={settings}
                 onExit={exitEditorDialog}
               />
+            </Box>
+          ) : isModelSelectionOpen ? (
+            // TODO: Implement actual model selection UI
+            <Box borderStyle="round" borderColor={Colors.AccentBlue} padding={1} marginY={1}>
+              <Text>Model Selection Placeholder (Press ESC to close)</Text>
+              <Text>Available Models: model1, model2, model3</Text>
+            </Box>
+          ) : showModelSwitchSuggestion ? (
+            <Box borderStyle="round" borderColor={Colors.AccentYellow} padding={1} marginY={1} flexDirection="column">
+              <Text color={Colors.AccentYellow}>Having trouble connecting or getting responses?</Text>
+              <Text>You can try switching to a different AI model.</Text>
+              <Box marginTop={1}>
+                <Box marginRight={2}>
+                  <Text onPress={() => {
+                    setShowModelSwitchSuggestion(false);
+                    setIsModelSelectionOpen(true); // Open the (placeholder) model selection
+                    triedAccountsInCurrentSequence.current.clear(); // Reset trackers
+                    triedApiKeysInCurrentSequence.current.clear();
+                  }}><Text color={Colors.AccentBlue}>Switch Model (Ctrl+M)</Text></Text>
+                </Box>
+                <Box marginRight={2}>
+                  <Text onPress={() => {
+                    if (lastFailedQuery.current) {
+                       setShowModelSwitchSuggestion(false);
+                       doSubmitQuery(lastFailedQuery.current, {isContinuation: true}); // Retry last query
+                       triedAccountsInCurrentSequence.current.clear();
+                       triedApiKeysInCurrentSequence.current.clear();
+                    } else {
+                       addItem({ type: MessageType.INFO, text: "No previous query to retry." }, Date.now());
+                       setShowModelSwitchSuggestion(false);
+                    }
+                  }}><Text color={Colors.AccentGreen}>Retry Last Query</Text></Text>
+                </Box>
+                <Text onPress={() => {
+                  setShowModelSwitchSuggestion(false);
+                  triedAccountsInCurrentSequence.current.clear();
+                  triedApiKeysInCurrentSequence.current.clear();
+                }}><Text color={Colors.TextPrimary}>Dismiss</Text></Text>
+              </Box>
             </Box>
           ) : showPrivacyNotice ? (
             <PrivacyNotice

@@ -126,6 +126,7 @@ export interface ConfigParameters {
   bugCommand?: BugCommandSettings;
   model: string;
   extensionContextFilePaths?: string[];
+  geminiApiKeys?: string[]; // For multiple API keys
 }
 
 export class Config {
@@ -152,6 +153,8 @@ export class Config {
   private readonly telemetrySettings: TelemetrySettings;
   private readonly usageStatisticsEnabled: boolean;
   private geminiClient!: GeminiClient;
+  private readonly geminiApiKeys: string[] = [];
+  private currentApiKeyIndex = 0;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
     enableRecursiveFileSearch: boolean;
@@ -207,6 +210,25 @@ export class Config {
     this.bugCommand = params.bugCommand;
     this.model = params.model;
     this.extensionContextFilePaths = params.extensionContextFilePaths ?? [];
+    if (params.geminiApiKeys && params.geminiApiKeys.length > 0) {
+      this.geminiApiKeys = params.geminiApiKeys;
+    } else if (process.env.GEMINI_API_KEY) {
+      // Fallback to single GEMINI_API_KEY if multiple are not provided
+      this.geminiApiKeys = [process.env.GEMINI_API_KEY];
+    }
+    // Read GEMINI_API_KEY_1, GEMINI_API_KEY_2, etc.
+    for (let i = 1; i < 100; i++) {
+      const key = process.env[`GEMINI_API_KEY_${i}`];
+      if (key) {
+        if (!this.geminiApiKeys.includes(key)) { // Avoid duplicates if also in params.geminiApiKeys
+            this.geminiApiKeys.push(key);
+        }
+      } else {
+        // Stop if a numbered key is not found
+        break;
+      }
+    }
+
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -447,6 +469,26 @@ export class Config {
       await this.gitService.initialize();
     }
     return this.gitService;
+  }
+
+  getCurrentGeminiApiKey(): string | undefined {
+    if (this.geminiApiKeys.length === 0) {
+      return undefined;
+    }
+    return this.geminiApiKeys[this.currentApiKeyIndex];
+  }
+
+  switchToNextGeminiApiKey(): string | undefined {
+    if (this.geminiApiKeys.length === 0) {
+      return undefined;
+    }
+    this.currentApiKeyIndex =
+      (this.currentApiKeyIndex + 1) % this.geminiApiKeys.length;
+    return this.geminiApiKeys[this.currentApiKeyIndex];
+  }
+
+  hasMultipleApiKeys(): boolean {
+    return this.geminiApiKeys.length > 1;
   }
 }
 
